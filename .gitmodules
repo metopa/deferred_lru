@@ -1,0 +1,6 @@
+[submodule "benchmark/thirdparty/tbb"]
+	path = benchmark/thirdparty/tbb
+	url = git@github.com:metopa/tbb.git
+[submodule "benchmark/thirdparty/hhvm"]
+	path = benchmark/thirdparty/hhvm
+	url = git@github.com:tstarling/thread-safe-lru.git
