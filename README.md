@@ -118,3 +118,8 @@ TBA
 TBA
 
 ## Thanks
+
+This work was supported by the Czech Ministry of Education,
+Youth and Sports under OPVVV Grant No. CZ.02.1.01/0.0/0.0/16 019/0000765
+(Research Center for Informatics project) and by the Grant Agency
+of the Czech Technical University in Prague, grant No. SGS17/215/OHK3/3T/18.
