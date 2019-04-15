@@ -181,9 +181,11 @@ struct EmptyDeletePolicy {
  * - Fake recent list tail
  * - Memory barrier on when adding to recent list
  */
-template <typename KeyT, typename ValueT, typename DeletionPolicyT = EmptyDeletePolicy,
-          typename LockT = std::mutex, typename HasherT = std::hash<KeyT>,
-          int HashtableLoadFactor = 4>
+template <typename KeyT, typename ValueT,
+        typename DeletionPolicyT = EmptyDeletePolicy,
+        typename LockT = std::mutex,
+        typename HasherT = std::hash<KeyT>,
+        int HashtableLoadFactor = 4>
 class DeferredLRU {
   public:
     using key_t             = KeyT;
@@ -211,14 +213,14 @@ class DeferredLRU {
     constexpr static int hashtableLoadFactor() { return HashtableLoadFactor; }
 
     struct NodeBase {
-        atomic_t<NodeBase*> lru_next    = {nullptr};
-        atomic_t<NodeBase*> lru_prev    = {nullptr};
+        atomic_t<NodeBase*> lru_next = {nullptr};
+        atomic_t<NodeBase*> lru_prev = {nullptr};
         atomic_t<NodeBase*> recent_next = {nullptr};
-        NodeBase*           bucket_next = {nullptr};
+        NodeBase* bucket_next = {nullptr};
     };
 
     struct Node : NodeBase {
-        key_t   key;
+        key_t key;
         value_t value;
     };
 
@@ -236,48 +238,12 @@ class DeferredLRU {
 
     ~DeferredLRU() { releaseMemory(); }
 
-    size_t currentOverheadMemory() const {
-        return sizeof(BucketHead) * buckets_.size() +
-               sizeof(lock_t) * std::min(buckets_.size(), maxBucketLockSize()) +
-               (sizeof(Node) - sizeof(key_t) - sizeof(value_t)) * this->current_element_count_;
-    }
-
     static double elementSize() {
         return sizeof(Node) + sizeof(BucketHead) / (double)hashtableLoadFactor();
     }
 
     void allocateMemory(size_t capacity, bool is_item_capacity, double pull_threshold_factor = 0.1,
-                        double purge_threshold_factor = 0.1) {
-        max_element_count_     = is_item_capacity ? capacity : maxElementCountForCapacity(capacity);
-        current_element_count_ = 0;
-        if (capacity == 0) {
-            return;
-        }
-        buckets_.assign(getBucketCountForCapacity(this->max_element_count_), BucketHead());
-        bucket_locks_.reset(new lock_t[std::min(buckets_.size(), maxBucketLockSize())]);
-        nodes_.reset(new Node[this->max_element_count_]);
-        pull_threshold_ =
-            std::max<size_t>(size_t(pull_threshold_factor * this->max_element_count_), 1);
-        purge_threshold_ =
-            std::max<size_t>(size_t(purge_threshold_factor * this->max_element_count_), 1);
-
-        lru_head_.lru_prev = nullptr;
-        lru_head_.lru_next = &lru_tail_;
-        lru_tail_.lru_prev = &lru_head_;
-        lru_tail_.lru_next = nullptr;
-
-        recent_head_  = recentDummyTerminalPtr();
-        recent_count_ = 0;
-
-        pull_request_  = false;
-        purge_request_ = false;
-
-        empty_head_ = &nodes_[0];
-        for (size_t i = 0; i < this->max_element_count_ - 1; i++) {
-            nodes_[i].lru_next = &nodes_[i + 1];
-        }
-        nodes_[this->max_element_count_ - 1].lru_next = nullptr;
-    }
+                        double purge_threshold_factor = 0.1) {}
 
     /// calls the eviction policy on all the objects in the cache
     void releaseMemory() {
@@ -295,6 +261,10 @@ class DeferredLRU {
         bucket_locks_.reset();
     }
 
+    size_t capacity() const { return max_element_count_; }
+
+    size_t approximateSize() const { return current_element_count_; }
+
     /**
      * Lock a bucket that is associated with the key,
      * find a node with the same key in the bucket.
@@ -311,8 +281,8 @@ class DeferredLRU {
         auto bucket_nr = keyToBucketNr(key);
         lockBucket(bucket_nr);
 
-        Node* node  = searchBucket(key, bucket_nr);
-        bool  found = node != nullptr;
+        Node* node = searchBucket(key, bucket_nr);
+        bool found = node != nullptr;
 
         if (found) {
             consumer = node->value;
@@ -367,8 +337,8 @@ class DeferredLRU {
         // get new node from pool
         // if pool is empty, we may trigger purge op to find some
         // or SPIN if other thread is currently doing it
-        Node* node  = allocateNode();
-        node->key   = std::forward<ForwardKeyT>(key);
+        Node* node = allocateNode();
+        node->key = std::forward<ForwardKeyT>(key);
         node->value = std::forward<ForwardValueT>(value);
 
         // prevent node from being marked as recent since it's not in LRU yet
@@ -400,7 +370,7 @@ class DeferredLRU {
             return;
         }
 
-        auto x   = producer();
+        auto x = producer();
         consumer = x;
         insert(key, std::move(x));
     }
@@ -442,7 +412,7 @@ class DeferredLRU {
     void pullRecent() {
         NodeBase* current = popRecentListSlice();
 
-        NodeBase  head;
+        NodeBase head;
         NodeBase* prev = &head;
 
         while (current != recentDummyTerminalPtr()) {
@@ -460,7 +430,7 @@ class DeferredLRU {
                 prev->lru_next.store(current, std::memory_order_relaxed);
                 current->lru_prev.store(prev, std::memory_order_relaxed);
 
-                prev    = current;
+                prev = current;
                 current = prev->recent_next.load(std::memory_order_relaxed);
                 prev->recent_next.store(nullptr, std::memory_order_relaxed);
             }
@@ -597,9 +567,9 @@ class DeferredLRU {
         auto bucket_nr = keyToBucketNr(node->key);
 
         lockBucket(bucket_nr);
-        BucketHead& head  = buckets_[bucket_nr];
+        BucketHead& head = buckets_[bucket_nr];
         node->bucket_next = head.bucket_next;
-        head.bucket_next  = node;
+        head.bucket_next = node;
         unlockBucket(bucket_nr);
     }
 
@@ -634,7 +604,7 @@ class DeferredLRU {
         }
 
         if (head.bucket_next == node) {
-            head.bucket_next  = (Node*)(node->bucket_next);
+            head.bucket_next = (Node*)(node->bucket_next);
             node->bucket_next = nullptr;
             unlockBucket(bucket_nr);
             return true;
@@ -645,7 +615,7 @@ class DeferredLRU {
         while (parent) {
             if (parent->bucket_next == node) {
                 parent->bucket_next = node->bucket_next;
-                node->bucket_next   = nullptr;
+                node->bucket_next = nullptr;
                 unlockBucket(bucket_nr);
                 return true;
             }
@@ -678,12 +648,10 @@ class DeferredLRU {
         return static_cast<size_t>(capacity / s);
     }
 
-    size_t capacity() const { return max_element_count_; }
-
-    size_t approximateSize() const { return current_element_count_; }
-
-  protected:
+  private:
     size_t max_element_count_;
+    size_t pull_threshold_;
+    size_t purge_threshold_;
 
     atomic_t<size_t> current_element_count_;
 
@@ -693,19 +661,16 @@ class DeferredLRU {
     atomic_t<NodeBase*> empty_head_;
 
     atomic_t<NodeBase*> recent_head_;
-    atomic_t<size_t>    recent_count_;
-
-    size_t pull_threshold_;
-    size_t purge_threshold_;
+    atomic_t<size_t> recent_count_;
 
     atomic_t<bool> pull_request_;
     atomic_t<bool> purge_request_;
-    lock_t         lru_lock_;
+    lock_t lru_lock_;
 
-    std::unique_ptr<Node[]>   nodes_;
-    std::vector<BucketHead>   buckets_;
+    std::unique_ptr<Node[]> nodes_;
+    std::vector<BucketHead> buckets_;
     std::unique_ptr<lock_t[]> bucket_locks_;
 
-    hasher_t          hasher_;
+    hasher_t hasher_;
     deletion_policy_t deleter_;
 };
