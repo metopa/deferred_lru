@@ -6,6 +6,11 @@
 #include <mutex>
 #include <vector>
 
+struct EmptyDeletePolicy {
+    template <typename KeyT, typename ValueT>
+    void onDelete(const KeyT&, const ValueT&) {}
+};
+
 /**
  * # DeferredLRU
  * DeferredLRU is a concurrent LRU key-value cache.
@@ -176,14 +181,16 @@
  * - Fake recent list tail
  * - Memory barrier on when adding to recent list
  */
-
-template <typename Config>
+template <typename KeyT, typename ValueT, typename DeletionPolicyT = EmptyDeletePolicy,
+          typename LockT = std::mutex, typename HasherT = std::hash<KeyT>,
+          int HashtableLoadFactor = 4>
 class DeferredLRU {
   public:
-    using config  = Config;
-    using key_t   = typename config::key_t;
-    using value_t = typename config::value_t;
-    using lock_t  = typename config::locking_t;
+    using key_t             = KeyT;
+    using value_t           = ValueT;
+    using deletion_policy_t = DeletionPolicyT;
+    using lock_t            = LockT;
+    using hasher_t          = HasherT;
 
     template <typename T>
     using atomic_t = std::atomic<T>;
@@ -193,13 +200,15 @@ class DeferredLRU {
      * Defined with idea, that for T thread probability of 2 threads
      * accessing the same lock should * be <= p.
      * Probability is calculated as in the Birthday paradox.
-     * With T = 48, p ~= 0.03, size := 2^15
+     * With T == 48, p ~= 0.03, size = 2^15
      */
     static constexpr size_t maxBucketLockSize() { return 1 << 15; }
 
     static constexpr size_t bucketLockIndexMask() {
         return maxBucketLockSize() - 1; // gives 000111 mask for MAX=001000
     }
+
+    constexpr static int hashtableLoadFactor() { return HashtableLoadFactor; }
 
     struct NodeBase {
         atomic_t<NodeBase*> lru_next    = {nullptr};
@@ -229,8 +238,6 @@ class DeferredLRU {
 
     static const char* name() { return "xDeferredLRU"; }
 
-    decltype(auto) profileStats() const { return profile_stats_.getSlice(); }
-
     size_t currentOverheadMemory() const {
         return sizeof(BucketHead) * buckets_.size() +
                sizeof(lock_t) * std::min(buckets_.size(), maxBucketLockSize()) +
@@ -238,7 +245,7 @@ class DeferredLRU {
     }
 
     static double elementSize() {
-        return sizeof(Node) + sizeof(BucketHead) / (double)config::hashTableLoadFactor();
+        return sizeof(Node) + sizeof(BucketHead) / (double)hashtableLoadFactor();
     }
 
     void allocateMemory(size_t capacity, bool is_item_capacity, double pull_threshold_factor = 0.1,
@@ -274,8 +281,6 @@ class DeferredLRU {
             nodes_[i].lru_next = &nodes_[i + 1];
         }
         nodes_[this->max_element_count_ - 1].lru_next = nullptr;
-
-        profile_stats_.reset();
     }
 
     /// calls the eviction policy on all the objects in the cache
@@ -307,8 +312,6 @@ class DeferredLRU {
      */
     template <typename ValueConsumer>
     bool find(const key_t& key, ValueConsumer& consumer) {
-        profile_stats_.find++;
-
         auto bucket_nr = keyToBucketNr(key);
         lockBucket(bucket_nr);
 
@@ -362,8 +365,6 @@ class DeferredLRU {
      */
     template <typename ForwardKeyT, typename ForwardValueT>
     void insert(ForwardKeyT&& key, ForwardValueT&& value) {
-        profile_stats_.insert++;
-
         // reserving space for the element beforehand
         this->current_element_count_++;
 
@@ -412,14 +413,91 @@ class DeferredLRU {
      * Print the current cache state.
      * @param msg
      */
-    void dump(const char* msg = nullptr);
+    void dump(const char* msg = nullptr) {
+        std::cout << "DeferredLRU dump: " << (msg ? msg : "") << "\nLRU:    ";
+        size_t lru_total_count = 0;
+        size_t lru_recent_count = 0;
+
+        NodeBase* current = &lru_head_;
+        while (current) {
+            if (current != &lru_head_) {
+                std::cout << " :: ";
+                if (current != &lru_tail_) {
+                    lru_total_count++;
+                    if (markedRecent(current)) {
+                        lru_recent_count++;
+                    }
+                }
+            }
+            std::cout << ptrName(current);
+            current = current->lru_next;
+        }
+        size_t recent_count = 0;
+        std::cout << "\nRECENT: ";
+        current = recent_head_;
+        while (current) {
+            std::cout << " :> " << ptrName(current);
+            if (current == recentDummyTerminalPtr()) {
+                break;
+            } else {
+                recent_count++;
+                current = current->recent_next;
+            }
+        }
+        std::cout << "\nEMPTY:  ";
+        current = empty_head_;
+        while (current) {
+            std::cout << " :> " << ptrName(current);
+            current = current->lru_next;
+        }
+        std::cout << "\n";
+
+        std::cout << "expected count: " << this->current_element_count_ << '(' << this->recent_count_
+                  << "*)\n"
+                  << "lru count:      " << lru_total_count << '(' << lru_recent_count << "*)\n"
+                  << "recent count:    (" << recent_count << "*)\n\n"
+                  << std::endl;
+    }
 
   private:
-    const char* ptrName(void* ptr, char* ext_buf = nullptr);
+    const char* ptrName(void* ptr, char* ext_buf = nullptr) {
+        if (named_nodes_.empty()) {
+            named_nodes_.insert({{&lru_head_,               "lru_head"},
+                                 {&lru_tail_,               "lru_tail"},
+                                 {&empty_head_,             "pool_head"},
+                                 {&recent_head_,            "recent_head"},
+                                 {recentDummyTerminalPtr(), "<TERMINAL>"},
+                                 {nullptr,                  "NULL"}});
+        }
+        static thread_local char buf[1000];
+        if (!ext_buf) {
+            ext_buf = buf;
+        }
+
+        if (named_nodes_.count(ptr)) {
+            return named_nodes_[ptr];
+        }
+        if (ptr >= &nodes_[0] && ptr <= &nodes_[this->max_element_count_ - 1]) {
+            bool is_recent = markedRecent((Node*)ptr);
+            if (std::is_same<key_t, int>::value) {
+                sprintf(ext_buf, "#%lu<%lu>%c", (Node*)ptr - &nodes_[0], ((Node*)ptr)->key,
+                        is_recent ? '*' : '\0');
+            } else {
+                sprintf(ext_buf, "#%lu%c", (Node*)ptr - &nodes_[0], is_recent ? '*' : '\0');
+            }
+            return ext_buf;
+        }
+        if (ptr >= &buckets_.front() && ptr <= &buckets_.back()) {
+            sprintf(ext_buf, "Bucket[%lu]", (BucketHead*)ptr - &buckets_.front());
+            return ext_buf;
+        }
+        sprintf(ext_buf, "???[%p]", ptr);
+
+        return ext_buf;
+    }
 
     static size_t getBucketCountForCapacity(size_t capacity) {
-        return (size_t)(capacity + config::hashTableLoadFactor() - 1) /
-               config::hashTableLoadFactor();
+        return (size_t)(capacity + hashtableLoadFactor() - 1) / hashtableLoadFactor();
     }
 
     bool requestPull() {
@@ -507,7 +585,6 @@ class DeferredLRU {
                 Node* typed_node = reinterpret_cast<Node*>(node);
                 // Can fail if node was JUST marked recent
                 if (removeNodeFromBucket(typed_node, false)) {
-                    profile_stats_.evict++;
                     removeNodeFromLru(typed_node);
 
                     deleter_.onDelete(std::move(typed_node->key), std::move(typed_node->value));
@@ -529,7 +606,6 @@ class DeferredLRU {
     void addNodeToLruHead(NodeBase* node) { addSublistToLruHead(node, node); }
 
     void addSublistToLruHead(NodeBase* first, NodeBase* last) {
-        profile_stats_.head_accesses++;
         first->lru_prev.store(&lru_head_, std::memory_order_relaxed);
         NodeBase* current_next = lru_head_.lru_next.load(std::memory_order_relaxed);
 
@@ -726,101 +802,16 @@ class DeferredLRU {
     size_t pull_threshold_;
     size_t purge_threshold_;
 
-    std::atomic<bool> pull_request_;
-    std::atomic<bool> purge_request_;
-    std::mutex        lru_lock_; // TODO use typedef from config
+    atomic_t<bool> pull_request_;
+    atomic_t<bool> purge_request_;
+    lock_t         lru_lock_;
 
     std::unique_ptr<Node[]>   nodes_;
     std::vector<BucketHead>   buckets_;
     std::unique_ptr<lock_t[]> bucket_locks_;
 
-    typename config::hasher_t        hasher_;
-    typename config::deletion_policy deleter_;
-    typename config::profile_stats_t profile_stats_;
+    hasher_t          hasher_;
+    deletion_policy_t deleter_;
 
     std::map<void*, const char*> named_nodes_; // For debugging only
 };
-
-template <typename Config>
-void DeferredLRU<Config>::dump(const char* msg) {
-    std::cout << "DeferredLRU dump: " << (msg ? msg : "") << "\nLRU:    ";
-    size_t lru_total_count  = 0;
-    size_t lru_recent_count = 0;
-
-    NodeBase* current = &lru_head_;
-    while (current) {
-        if (current != &lru_head_) {
-            std::cout << " :: ";
-            if (current != &lru_tail_) {
-                lru_total_count++;
-                if (markedRecent(current)) {
-                    lru_recent_count++;
-                }
-            }
-        }
-        std::cout << ptrName(current);
-        current = current->lru_next;
-    }
-    size_t recent_count = 0;
-    std::cout << "\nRECENT: ";
-    current = recent_head_;
-    while (current) {
-        std::cout << " :> " << ptrName(current);
-        if (current == recentDummyTerminalPtr()) {
-            break;
-        } else {
-            recent_count++;
-            current = current->recent_next;
-        }
-    }
-    std::cout << "\nEMPTY:  ";
-    current = empty_head_;
-    while (current) {
-        std::cout << " :> " << ptrName(current);
-        current = current->lru_next;
-    }
-    std::cout << "\n";
-
-    std::cout << "expected count: " << this->current_element_count_ << '(' << this->recent_count_
-              << "*)\n"
-              << "lru count:      " << lru_total_count << '(' << lru_recent_count << "*)\n"
-              << "recent count:    (" << recent_count << "*)\n\n"
-              << std::endl;
-}
-
-template <typename Config>
-const char* DeferredLRU<Config>::ptrName(void* ptr, char* ext_buf) {
-    if (named_nodes_.empty()) {
-        named_nodes_.insert({{&lru_head_, "lru_head"},
-                             {&lru_tail_, "lru_tail"},
-                             {&empty_head_, "pool_head"},
-                             {&recent_head_, "recent_head"},
-                             {recentDummyTerminalPtr(), "<TERMINAL>"},
-                             {nullptr, "NULL"}});
-    }
-    static thread_local char buf[1000];
-    if (!ext_buf) {
-        ext_buf = buf;
-    }
-
-    if (named_nodes_.count(ptr)) {
-        return named_nodes_[ptr];
-    }
-    if (ptr >= &nodes_[0] && ptr <= &nodes_[this->max_element_count_ - 1]) {
-        bool is_recent = markedRecent((Node*)ptr);
-        if (std::is_same<key_t, int>::value) {
-            sprintf(ext_buf, "#%lu<%lu>%c", (Node*)ptr - &nodes_[0], ((Node*)ptr)->key,
-                    is_recent ? '*' : '\0');
-        } else {
-            sprintf(ext_buf, "#%lu%c", (Node*)ptr - &nodes_[0], is_recent ? '*' : '\0');
-        }
-        return ext_buf;
-    }
-    if (ptr >= &buckets_.front() && ptr <= &buckets_.back()) {
-        sprintf(ext_buf, "Bucket[%lu]", (BucketHead*)ptr - &buckets_.front());
-        return ext_buf;
-    }
-    sprintf(ext_buf, "???[%p]", ptr);
-
-    return ext_buf;
-}
