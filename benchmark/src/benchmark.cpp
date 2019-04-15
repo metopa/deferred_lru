@@ -88,7 +88,7 @@ int BenchmarkApp::parse(int argc, char** argv) {
 void BenchmarkApp::run() {
     try {
         using config_t = ContainerConfig<lru_key_t, lru_value_t, std::hash<lru_key_t>, std::less<>,
-                                         OpenMPLock, EmptyDeletePolicy, 4, false, false>;
+                                         OpenMPLock, EmptyDeletePolicy2, 4, false, false>;
 
         CsvLogger l(log_file, verbose);
 

@@ -13,7 +13,7 @@ struct TrivialHash {
     }
 };
 
-struct EmptyDeletePolicy {
+struct EmptyDeletePolicy2 {
     template <typename KeyT, typename ValueT>
     void onDelete(const KeyT&, const ValueT&) {}
 };
@@ -49,7 +49,7 @@ struct EmptyDeletePolicy {
  */
 
 template <typename KeyT, typename ValueT, typename HasherT, typename CompT, typename LockingT,
-          typename DeletionPolicy = EmptyDeletePolicy, int HashTableLoadFactor = 4,
+          typename DeletionPolicy = EmptyDeletePolicy2, int HashTableLoadFactor = 4,
           bool EnableDebug = false, bool EnableProfile = false>
 struct ContainerConfig {
     using key_t            = KeyT;
