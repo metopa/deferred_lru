@@ -2,7 +2,7 @@
 
 #include <atomic>
 #include <cstddef>
-#include <map>
+#include <memory>
 #include <mutex>
 #include <vector>
 
@@ -236,8 +236,6 @@ class DeferredLRU {
 
     ~DeferredLRU() { releaseMemory(); }
 
-    static const char* name() { return "xDeferredLRU"; }
-
     size_t currentOverheadMemory() const {
         return sizeof(BucketHead) * buckets_.size() +
                sizeof(lock_t) * std::min(buckets_.size(), maxBucketLockSize()) +
@@ -250,9 +248,7 @@ class DeferredLRU {
 
     void allocateMemory(size_t capacity, bool is_item_capacity, double pull_threshold_factor = 0.1,
                         double purge_threshold_factor = 0.1) {
-        max_element_count_ = is_item_capacity ? capacity : maxElementCountForCapacity(capacity);
-        total_mem_available_ =
-            is_item_capacity ? (size_t)(estimatedElementSize() * capacity) : capacity;
+        max_element_count_     = is_item_capacity ? capacity : maxElementCountForCapacity(capacity);
         current_element_count_ = 0;
         if (capacity == 0) {
             return;
@@ -409,93 +405,7 @@ class DeferredLRU {
         insert(key, std::move(x));
     }
 
-    /**
-     * Print the current cache state.
-     * @param msg
-     */
-    void dump(const char* msg = nullptr) {
-        std::cout << "DeferredLRU dump: " << (msg ? msg : "") << "\nLRU:    ";
-        size_t lru_total_count = 0;
-        size_t lru_recent_count = 0;
-
-        NodeBase* current = &lru_head_;
-        while (current) {
-            if (current != &lru_head_) {
-                std::cout << " :: ";
-                if (current != &lru_tail_) {
-                    lru_total_count++;
-                    if (markedRecent(current)) {
-                        lru_recent_count++;
-                    }
-                }
-            }
-            std::cout << ptrName(current);
-            current = current->lru_next;
-        }
-        size_t recent_count = 0;
-        std::cout << "\nRECENT: ";
-        current = recent_head_;
-        while (current) {
-            std::cout << " :> " << ptrName(current);
-            if (current == recentDummyTerminalPtr()) {
-                break;
-            } else {
-                recent_count++;
-                current = current->recent_next;
-            }
-        }
-        std::cout << "\nEMPTY:  ";
-        current = empty_head_;
-        while (current) {
-            std::cout << " :> " << ptrName(current);
-            current = current->lru_next;
-        }
-        std::cout << "\n";
-
-        std::cout << "expected count: " << this->current_element_count_ << '(' << this->recent_count_
-                  << "*)\n"
-                  << "lru count:      " << lru_total_count << '(' << lru_recent_count << "*)\n"
-                  << "recent count:    (" << recent_count << "*)\n\n"
-                  << std::endl;
-    }
-
   private:
-    const char* ptrName(void* ptr, char* ext_buf = nullptr) {
-        if (named_nodes_.empty()) {
-            named_nodes_.insert({{&lru_head_,               "lru_head"},
-                                 {&lru_tail_,               "lru_tail"},
-                                 {&empty_head_,             "pool_head"},
-                                 {&recent_head_,            "recent_head"},
-                                 {recentDummyTerminalPtr(), "<TERMINAL>"},
-                                 {nullptr,                  "NULL"}});
-        }
-        static thread_local char buf[1000];
-        if (!ext_buf) {
-            ext_buf = buf;
-        }
-
-        if (named_nodes_.count(ptr)) {
-            return named_nodes_[ptr];
-        }
-        if (ptr >= &nodes_[0] && ptr <= &nodes_[this->max_element_count_ - 1]) {
-            bool is_recent = markedRecent((Node*)ptr);
-            if (std::is_same<key_t, int>::value) {
-                sprintf(ext_buf, "#%lu<%lu>%c", (Node*)ptr - &nodes_[0], ((Node*)ptr)->key,
-                        is_recent ? '*' : '\0');
-            } else {
-                sprintf(ext_buf, "#%lu%c", (Node*)ptr - &nodes_[0], is_recent ? '*' : '\0');
-            }
-            return ext_buf;
-        }
-        if (ptr >= &buckets_.front() && ptr <= &buckets_.back()) {
-            sprintf(ext_buf, "Bucket[%lu]", (BucketHead*)ptr - &buckets_.front());
-            return ext_buf;
-        }
-        sprintf(ext_buf, "???[%p]", ptr);
-
-        return ext_buf;
-    }
-
     static size_t getBucketCountForCapacity(size_t capacity) {
         return (size_t)(capacity + hashtableLoadFactor() - 1) / hashtableLoadFactor();
     }
@@ -763,31 +673,17 @@ class DeferredLRU {
         bucket_locks_[bucket_nr & bucketLockIndexMask()].unlock();
     }
 
-  public:
-    static double estimatedElementSize() { return elementSize(); }
-
     static size_t maxElementCountForCapacity(size_t capacity) {
-        auto s = estimatedElementSize();
+        auto s = elementSize();
         return static_cast<size_t>(capacity / s);
     }
 
     size_t capacity() const { return max_element_count_; }
 
-    size_t size() const { return current_element_count_; }
-
-    MemStats memStats() const {
-        MemStats s{};
-        s.count              = current_element_count_;
-        s.capacity           = max_element_count_;
-        s.total_mem          = total_mem_available_;
-        s.used_mem           = elementSize() * current_element_count_;
-        s.total_overhead_mem = currentOverheadMemory();
-        return s;
-    }
+    size_t approximateSize() const { return current_element_count_; }
 
   protected:
     size_t max_element_count_;
-    size_t total_mem_available_;
 
     atomic_t<size_t> current_element_count_;
 
@@ -812,6 +708,4 @@ class DeferredLRU {
 
     hasher_t          hasher_;
     deletion_policy_t deleter_;
-
-    std::map<void*, const char*> named_nodes_; // For debugging only
 };
