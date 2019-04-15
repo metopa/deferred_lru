@@ -227,7 +227,7 @@ class DeferredLRU {
 
     ~DeferredLRU() { releaseMemory(); }
 
-    static const char* name() { return "DeferredLRU"; }
+    static const char* name() { return "xDeferredLRU"; }
 
     decltype(auto) profileStats() const { return profile_stats_.getSlice(); }
 
