@@ -12,48 +12,14 @@ struct EmptyDeletePolicy {
 };
 
 /**
- * # DeferredLRU
  * DeferredLRU is a concurrent LRU key-value cache.
  *
- * It is based on a conjunction of hash table
- * (for fast item lookup) and intrusive doubly
+ * It is based on a conjunction of a hash table
+ * (for fast item lookup) and an intrusive doubly
  * linked list (for tracking least recently items).
+ * Memory overhead per node is close to the size of 4 pointers.
  *
- * ## Glossary
- * Recent list
- *   ...
- * Recent head
- *   ...
- * Recent node
- *   Node that is in the recent list
- * Purge
- *   ...
- * Node
- *   ...
- * LRU list
- *   ...
- * LRU head
- *   ...
- * LRU tail
- *   ...
- * Empty list
- *   ...
- * Item
- *   Same as node
- * Hash table
- *   ...
- * Bucket
- *   ...
- * Capacity constraints
- *   ...
- * Pull/purge token
- *   ...
- * Node pull
- *   ...
- *
- *
- * ## Supported operations
- *
+ * Supported operations
  *   - Basic operations
  *      - FIND node by key and mark this node as recently accessed
  *      - INSERT new node (this can trigger PURGE
@@ -80,22 +46,6 @@ struct EmptyDeletePolicy {
  *     - DUMP NODE TO POOL
  *
  *
- * ### Find
- *   > h := hash(key)
- *   > bucked := ht[h % ht_size]
- *   > lock bucket
- *   >   found := traverse items
- *   >   if found:
- *   >     consume node->value
- *   >     MARK RECENT node
- *   > unlock bucket
- *   >
- *   > if required:
- *   >   PULL RECENT
- *   >
- *   > return found
- *
- *
  * ### Insert
  *   Node can't be evicted before it is added ot a bucket:
  *      First we add node to hash table and only then to a LRU list.
@@ -103,83 +53,6 @@ struct EmptyDeletePolicy {
  *      when inserted node is attempted to be purged before
  *      it is inserted into a bucket. (TODO: detailed explanation).
  *
- *   Node can't be evicted before it is added to LRU list:
- *      Artificial RECENT link (TODO: explain)
- *
- *   > node := GET EMPTY NODE
- *   > node.key/value = key/value
- *   > node.recent_link = AUX_RECENT
- *   >
- *   > UPDATE CAPACITY with node
- *   >
- *   > h := hash(key)
- *   > bucked := ht[h % ht_size]
- *   > lock bucket
- *   >   add node to bucket
- *   >   unlock bucket
- *   > unlock bucket
- *   >
- *   > ADD node TO LRU
- *   > node.recent_link = NULL
- *   > FIXME: atomically set node.recent_link while inserting to head
- *   > if capacity constraints are violated:
- *   >   PURGE OLD
- *
- * ### PULL RECENT
- *   > try obtain pull/purge token:
- *   > if failed:
- *   >   exit (other thread is already handling this)
- *   >
- *   > recent_head := GET RECENT SLICE
- *   > lru_temp_head := NONE
- *   >
- *   > for each node in head:
- *   >   evict node from LRU
- *   >   FIXME: LRU head refers to node
- *   >   append node to a lru_temp_head
- *   >
- *   > BULK ADD lru_temp_head TO LRU
- *   > FIXME: how to atomically reset all recent_link? (refer to flag)
- *   >
- *   > revoke pull/purge token
- *
- * ### PURGE OLD
- *   > try obtain pull/purge token:
- *   > if failed:
- *   >   exit (other thread is already handling this)
- *   >
- *   > traverse backward from LRU tail
- *   >   TODO: handle RECENT nodes with stub links
- *   >   if node is RECENT:
- *   >     try REMOVE FROM BUCKET
- *   >       if success:
- *   >         delete content
- *   >         ADD node TO POOL
- *   >   # else we just skip it, it will be handled
- *   >   # by the followed PULL RECENT operation
- *   > PULL RECENT
- *   > TODO: try to take whole tail as a sublist (tag pointer?)
- *
- *
- * - dynamic memory
- * - recent list
- * - double list head
- * - pull tail sublist as whole
- *
- * - concurrency
- *  - synchronization
- *  - atomic operations
- *  - deadlock prevention
- *  - invariants
- *  - value retrieval in concurrent environment
- * - parameter search (purge limit/pull limit)
- *
- * ## Notes
- *
- * - Comparison with Bag-LRU
- * - Do not access head neighbor
- * - Fake recent list tail
- * - Memory barrier on when adding to recent list
  */
 template <typename KeyT, typename ValueT, typename DeletionPolicyT = EmptyDeletePolicy,
           typename LockT = std::mutex, typename HasherT = std::hash<KeyT>,
@@ -224,10 +97,17 @@ class DeferredLRU {
     ** (De-)Initialization
     *****************************************************************/
 
+    /**
+     * Initialize DeferredLRU cache.
+     * @param capacity - cache capacity.
+     * @param is_item_capacity - if true, `capacity` is interpreted as a number of items stored.
+     *                           Otherwise, capacity is a number of bytes available for cache.
+     * @param pull_threshold_factor - max recent list size (as a fraction of the total capacity).
+     * @param purge_threshold_factor - number of nodes evicted upon PurgeOld
+     *                                 (as a fraction of the total capacity).
+     */
     explicit DeferredLRU(size_t capacity = 0, bool is_item_capacity = false,
                          double pull_threshold_factor = 0.1, double purge_threshold_factor = 0.1) {
-        /// initialize a cache that stores size objects.
-        /// Subsequently added object will cause an eviction.
         allocateMemory(capacity, is_item_capacity, pull_threshold_factor, purge_threshold_factor);
     }
 
@@ -237,6 +117,15 @@ class DeferredLRU {
 
     ~DeferredLRU() { releaseMemory(); }
 
+    /**
+     * Initialize DeferredLRU cache.
+     * @param capacity - cache capacity.
+     * @param is_item_capacity - if true, `capacity` is interpreted as a number of items stored.
+     *                           Otherwise, capacity is a number of bytes available for cache.
+     * @param pull_threshold_factor - max recent list size (as a fraction of the total capacity).
+     * @param purge_threshold_factor - number of nodes evicted upon PurgeOld
+     *                                 (as a fraction of the total capacity).
+     */
     void allocateMemory(size_t capacity, bool is_item_capacity, double pull_threshold_factor = 0.1,
                         double purge_threshold_factor = 0.1) {
         max_element_count_     = is_item_capacity ? capacity : maxElementCountForCapacity(capacity);
@@ -271,7 +160,9 @@ class DeferredLRU {
         nodes_[this->max_element_count_ - 1].lru_next = nullptr;
     }
 
-    /// calls the eviction policy on all the objects in the cache
+    /**
+     * Evict all items in the cache and free all managed memory.
+     */
     void releaseMemory() {
         for (BucketHead& bucket : buckets_) {
             Node* node = bucket.bucket_next;
@@ -291,14 +182,29 @@ class DeferredLRU {
     ** Container introspection
     *****************************************************************/
 
+    /**
+     * Max number of items the cache can hold.
+     */
     size_t capacity() const { return max_element_count_; }
 
+    /**
+     * Current number of items in the cache.
+     * Note that it changes rapidly in a concurrent environment,
+     * so it can be used only as a hint for the actual number of items.
+     */
     size_t approximateSize() const { return current_element_count_; }
 
+    /**
+     * Number of bytes each item takes together with its overhead.
+     */
     static double elementSize() {
         return sizeof(Node) + sizeof(BucketHead) / (double)hashtableLoadFactor();
     }
 
+    /**
+     * Returns the number of items that can fit in the given amount of memory.
+     * @param capacity - memory size in bytes.
+     */
     static size_t maxElementCountForCapacity(size_t capacity) {
         return static_cast<size_t>(capacity / elementSize());
     }
@@ -308,15 +214,23 @@ class DeferredLRU {
     *****************************************************************/
 
     /**
-     * Lock a bucket that is associated with the key,
-     * find a node with the same key in the bucket.
-     * If found, write it to consumer and mark the node as recent,
-     * conditionally requesting pull op and doing a consolidation.
+     * Find a value in the cache by its key.
      *
-     * @tparam ValueConsumer
-     * @param key
-     * @param consumer
-     * @return true if the key was found
+     * This function is thread-safe.
+     *
+     * Internally it locks a bucket that is associated with the key,
+     * searches for a node with the same key in the bucket.
+     * If found, writes it to the consumer and marks the node as recent,
+     * conditionally requesting pull operation.
+     *
+     * @param key - the key to be searched.
+     * @param consumer - a placeholder for the value to be copied to.
+     *                   It can be a reference to a variable with the
+     *                   same type as the value or an object with
+     *                   an overloaded operator=, that performs
+     *                   thread-unsafe copying of the value.
+     *
+     * @return true if the key was found.
      */
     template <typename ValueConsumer>
     bool find(const key_t& key, ValueConsumer& consumer) {
