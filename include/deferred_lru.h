@@ -243,7 +243,38 @@ class DeferredLRU {
     }
 
     void allocateMemory(size_t capacity, bool is_item_capacity, double pull_threshold_factor = 0.1,
-                        double purge_threshold_factor = 0.1) {}
+                        double purge_threshold_factor = 0.1) {
+        max_element_count_     = is_item_capacity ? capacity : maxElementCountForCapacity(capacity);
+        current_element_count_ = 0;
+        if (capacity == 0) {
+            return;
+        }
+
+        buckets_.assign(getBucketCountForCapacity(this->max_element_count_), BucketHead());
+        bucket_locks_.reset(new lock_t[std::min(buckets_.size(), maxBucketLockSize())]);
+        nodes_.reset(new Node[this->max_element_count_]);
+        pull_threshold_ =
+            std::max<size_t>(size_t(pull_threshold_factor * this->max_element_count_), 1);
+        purge_threshold_ =
+            std::max<size_t>(size_t(purge_threshold_factor * this->max_element_count_), 1);
+
+        lru_head_.lru_prev = nullptr;
+        lru_head_.lru_next = &lru_tail_;
+        lru_tail_.lru_prev = &lru_head_;
+        lru_tail_.lru_next = nullptr;
+
+        recent_head_  = recentDummyTerminalPtr();
+        recent_count_ = 0;
+
+        pull_request_  = false;
+        purge_request_ = false;
+
+        empty_head_ = &nodes_[0];
+        for (size_t i = 0; i < this->max_element_count_ - 1; i++) {
+            nodes_[i].lru_next = &nodes_[i + 1];
+        }
+        nodes_[this->max_element_count_ - 1].lru_next = nullptr;
+    }
 
     /// calls the eviction policy on all the objects in the cache
     void releaseMemory() {
