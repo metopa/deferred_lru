@@ -6,8 +6,6 @@
 #include <mutex>
 #include <vector>
 
-#include "containers/container_base.h"
-
 /**
  * # DeferredLRU
  * DeferredLRU is a concurrent LRU key-value cache.
@@ -180,10 +178,9 @@
  */
 
 template <typename Config>
-class DeferredLRU : public ContainerBase<Config, DeferredLRU<Config>, true> {
+class DeferredLRU {
   public:
     using config  = Config;
-    using base_t  = ContainerBase<Config, DeferredLRU<Config>, true>;
     using key_t   = typename config::key_t;
     using value_t = typename config::value_t;
     using lock_t  = typename config::locking_t;
@@ -193,11 +190,13 @@ class DeferredLRU : public ContainerBase<Config, DeferredLRU<Config>, true> {
 
   private:
     /**
-     * Defined with idea, that for T thread probability of 2 threads accessing the same lock should
-     * be <= p. Probability is calculated as in birthday paradox. With T = 48, p ~= 0.03, size :=
-     * 2^15
+     * Defined with idea, that for T thread probability of 2 threads
+     * accessing the same lock should * be <= p.
+     * Probability is calculated as in the Birthday paradox.
+     * With T = 48, p ~= 0.03, size := 2^15
      */
     static constexpr size_t maxBucketLockSize() { return 1 << 15; }
+
     static constexpr size_t bucketLockIndexMask() {
         return maxBucketLockSize() - 1; // gives 000111 mask for MAX=001000
     }
@@ -219,8 +218,8 @@ class DeferredLRU : public ContainerBase<Config, DeferredLRU<Config>, true> {
     };
 
   public:
-    explicit DeferredLRU(size_t capacity = 0, bool is_item_capacity = false, double pull_threshold_factor = 0.1,
-                         double purge_threshold_factor = 0.1) {
+    explicit DeferredLRU(size_t capacity = 0, bool is_item_capacity = false,
+                         double pull_threshold_factor = 0.1, double purge_threshold_factor = 0.1) {
         /// initialize a cache that stores size objects.
         /// Subsequently added object will cause an eviction.
         allocateMemory(capacity, is_item_capacity, pull_threshold_factor, purge_threshold_factor);
@@ -244,7 +243,10 @@ class DeferredLRU : public ContainerBase<Config, DeferredLRU<Config>, true> {
 
     void allocateMemory(size_t capacity, bool is_item_capacity, double pull_threshold_factor = 0.1,
                         double purge_threshold_factor = 0.1) {
-        this->init(capacity, is_item_capacity);
+        max_element_count_ = is_item_capacity ? capacity : maxElementCountForCapacity(capacity);
+        total_mem_available_ =
+            is_item_capacity ? (size_t)(estimatedElementSize() * capacity) : capacity;
+        current_element_count_ = 0;
         if (capacity == 0) {
             return;
         }
@@ -414,10 +416,6 @@ class DeferredLRU : public ContainerBase<Config, DeferredLRU<Config>, true> {
 
   private:
     const char* ptrName(void* ptr, char* ext_buf = nullptr);
-
-    static size_t memSizeForElements(size_t count) {
-        return size_t(std::ceil(elementSize() * count));
-    }
 
     static size_t getBucketCountForCapacity(size_t capacity) {
         return (size_t)(capacity + config::hashTableLoadFactor() - 1) /
@@ -673,7 +671,9 @@ class DeferredLRU : public ContainerBase<Config, DeferredLRU<Config>, true> {
     }
 
     NodeBase* recentDummyTerminalPtr() {
-        return reinterpret_cast<NodeBase*>(&recent_dummy_terminal_);
+        // Arbitrary unique value
+        static int dummy = 0;
+        return reinterpret_cast<NodeBase*>(&dummy);
     }
 
     size_t keyToBucketNr(const key_t& key) {
@@ -687,6 +687,34 @@ class DeferredLRU : public ContainerBase<Config, DeferredLRU<Config>, true> {
         bucket_locks_[bucket_nr & bucketLockIndexMask()].unlock();
     }
 
+  public:
+    static double estimatedElementSize() { return elementSize(); }
+
+    static size_t maxElementCountForCapacity(size_t capacity) {
+        auto s = estimatedElementSize();
+        return static_cast<size_t>(capacity / s);
+    }
+
+    size_t capacity() const { return max_element_count_; }
+
+    size_t size() const { return current_element_count_; }
+
+    MemStats memStats() const {
+        MemStats s{};
+        s.count              = current_element_count_;
+        s.capacity           = max_element_count_;
+        s.total_mem          = total_mem_available_;
+        s.used_mem           = elementSize() * current_element_count_;
+        s.total_overhead_mem = currentOverheadMemory();
+        return s;
+    }
+
+  protected:
+    size_t max_element_count_;
+    size_t total_mem_available_;
+
+    atomic_t<size_t> current_element_count_;
+
     NodeBase lru_head_;
     NodeBase lru_tail_;
 
@@ -694,7 +722,6 @@ class DeferredLRU : public ContainerBase<Config, DeferredLRU<Config>, true> {
 
     atomic_t<NodeBase*> recent_head_;
     atomic_t<size_t>    recent_count_;
-    bool                recent_dummy_terminal_;
 
     size_t pull_threshold_;
     size_t purge_threshold_;
@@ -706,7 +733,6 @@ class DeferredLRU : public ContainerBase<Config, DeferredLRU<Config>, true> {
     std::unique_ptr<Node[]>   nodes_;
     std::vector<BucketHead>   buckets_;
     std::unique_ptr<lock_t[]> bucket_locks_;
-    unsigned                  bucket_lock_index_shift_;
 
     typename config::hasher_t        hasher_;
     typename config::deletion_policy deleter_;
