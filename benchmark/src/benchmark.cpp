@@ -9,7 +9,7 @@
 
 #include "benchmark.h"
 #include "containers/concurrent_lru.h"
-#include "../../deferred_lru/deferred_lru.h"
+#include "containers/deferred_lru.h"
 #include "containers/dummy.h"
 #include "containers/hash_fixed.h"
 #include "containers/hhvm_lru.h"
